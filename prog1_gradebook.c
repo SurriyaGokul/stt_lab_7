@@ -1,9 +1,3 @@
-
-/*
-  Program 1: Student Gradebook & Analytics
-  - Features: if/else-if chains, nested loops, for + while, early returns, and multiple assignments.
-  - No switch/goto; standard C only.
-*/
 #include <stdio.h>
 #include <string.h>
 
