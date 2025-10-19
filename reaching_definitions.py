@@ -1,44 +1,27 @@
-"""
-Reaching Definitions Analysis
-Implements the dataflow analysis algorithm for reaching definitions as per the assignment.
-"""
-
 import re
 from collections import defaultdict
 import pandas as pd
 
 class ReachingDefinitionsAnalysis:
     def __init__(self, cfg_data):
-        """
-        cfg_data: dictionary with keys:
-            - 'blocks': list of basic block names
-            - 'definitions': dict mapping definition_id to (block_name, variable, code_line)
-            - 'edges': list of (from_block, to_block) tuples
-            - 'gen': dict mapping block_name to list of definition_ids generated in that block
-            - 'kill': dict mapping block_name to list of definition_ids killed in that block
-        """
         self.blocks = cfg_data['blocks']
         self.definitions = cfg_data['definitions']
         self.edges = cfg_data['edges']
         self.gen = cfg_data['gen']
         self.kill = cfg_data['kill']
         
-        # Build predecessors map
         self.predecessors = defaultdict(list)
         for src, dst in self.edges:
             self.predecessors[dst].append(src)
         
-        # Initialize in[B] and out[B] as empty sets
         self.in_sets = {block: set() for block in self.blocks}
         self.out_sets = {block: set() for block in self.blocks}
         
         self.iterations = []
     
     def run_analysis(self):
-        """Run the iterative dataflow analysis until convergence"""
         iteration = 0
         
-        # Store initial state (iteration 0)
         self.iterations.append(self._capture_state(iteration))
         
         changed = True
@@ -47,27 +30,22 @@ class ReachingDefinitionsAnalysis:
             changed = False
             
             for block in self.blocks:
-                # Compute in[B] = Union of out[P] for all predecessors P of B
                 new_in = set()
                 for pred in self.predecessors[block]:
                     new_in = new_in.union(self.out_sets[pred])
                 
-                # Compute out[B] = gen[B] U (in[B] - kill[B])
                 new_out = set(self.gen[block]).union(new_in - set(self.kill[block]))
                 
-                # Check if anything changed
                 if new_in != self.in_sets[block] or new_out != self.out_sets[block]:
                     changed = True
                     self.in_sets[block] = new_in
                     self.out_sets[block] = new_out
             
-            # Store state after this iteration
             self.iterations.append(self._capture_state(iteration))
         
-        return iteration  # Return number of iterations to convergence
+        return iteration
     
     def _capture_state(self, iteration):
-        """Capture the current state of in[B] and out[B] for all blocks"""
         state = {
             'iteration': iteration,
             'blocks': {}
@@ -82,7 +60,6 @@ class ReachingDefinitionsAnalysis:
         return state
     
     def print_iterations_table(self):
-        """Print all iterations in a tabular format"""
         for iter_data in self.iterations:
             print(f"\n{'='*80}")
             print(f"ITERATION {iter_data['iteration']}")
@@ -103,7 +80,6 @@ class ReachingDefinitionsAnalysis:
             print(df.to_string(index=False))
     
     def save_to_csv(self, filename):
-        """Save all iterations to a CSV file"""
         all_rows = []
         for iter_data in self.iterations:
             for block in self.blocks:
@@ -122,7 +98,6 @@ class ReachingDefinitionsAnalysis:
         print(f"\nResults saved to {filename}")
     
     def print_definition_mapping(self):
-        """Print the mapping of definition IDs to code lines"""
         print("\n" + "="*80)
         print("DEFINITION MAPPING")
         print("="*80)
@@ -131,15 +106,28 @@ class ReachingDefinitionsAnalysis:
             print(f"{def_id}: {var} = ... (Block {block}, Line: {line})")
 
 
+def compute_kill_from_defs(blocks, definitions, gen):
+    var_to_defs = defaultdict(set)
+    for def_id, (_block, var, _line) in definitions.items():
+        var_to_defs[var].add(def_id)
+    kill = {b: [] for b in blocks}
+    for b in blocks:
+        gen_defs = set(gen.get(b, []))
+        vars_in_b = set(definitions[d][1] for d in gen_defs)
+        kset = set()
+        for v in vars_in_b:
+            all_defs = var_to_defs.get(v, set())
+            kset |= (all_defs - gen_defs)
+        kill[b] = sorted(kset)
+    return kill
+
+
 def analyze_prog1_gradebook():
-    """Analyze prog1_gradebook.c"""
     
-    # Define all assignment statements (definitions) in the program
-    # Format: def_id: (block, variable, code_line_description)
     definitions = {
         'D1': ('B1', 'n', 'scanf("%d", &n)'),
         'D2': ('B2', 'i', 'i = 0'),
-        'D3': ('B3', 'i', 'scanf(..., &cls[i].m1, ...)'),
+        'D3': ('B3', 'cls[i].m1', 'scanf(..., &cls[i].m1, ...)'),
         'D4': ('B3', 'cls[i].m1', 'scanf(..., &cls[i].m1, ...)'),
         'D5': ('B3', 'cls[i].m2', 'scanf(..., &cls[i].m2, ...)'),
         'D6': ('B3', 'cls[i].m3', 'scanf(..., &cls[i].m3, ...)'),
@@ -164,24 +152,21 @@ def analyze_prog1_gradebook():
         'D25': ('B7', 'class_avg', 'class_avg = sum/n'),
     }
     
-    # Simplified CFG blocks
     blocks = ['ENTRY', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'EXIT']
     
-    # CFG edges (control flow)
     edges = [
         ('ENTRY', 'B1'),
         ('B1', 'B2'),
         ('B2', 'B3'),
-        ('B3', 'B3'),  # loop back
+        ('B3', 'B3'),
         ('B3', 'B4'),
         ('B4', 'B5'),
         ('B5', 'B6'),
-        ('B6', 'B6'),  # loop back
+        ('B6', 'B6'),
         ('B6', 'B7'),
         ('B7', 'EXIT'),
     ]
     
-    # gen[B]: definitions generated in each block
     gen = {
         'ENTRY': [],
         'B1': ['D1'],
@@ -193,27 +178,15 @@ def analyze_prog1_gradebook():
         'B7': ['D25'],
         'EXIT': [],
     }
-    
-    # kill[B]: definitions of the same variables killed by this block
-    # A definition is killed if another definition of the same variable is generated
-    kill = {
-        'ENTRY': [],
-        'B1': [],
-        'B2': ['D3', 'D15', 'D20', 'D24'],  # kills other defs of i
-        'B3': ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13', 'D14', 'D15', 'D20', 'D24'],  # multiple redefs
-        'B4': [],
-        'B5': ['D17', 'D18', 'D19', 'D2', 'D3', 'D15', 'D20', 'D24'],  # kills defs of sum, countA, countF, i
-        'B6': ['D17', 'D18', 'D19', 'D20', 'D21', 'D22', 'D23', 'D24', 'D2', 'D3', 'D15'],  # kills own defs + i defs
-        'B7': [],
-        'EXIT': [],
-    }
+
+    computed_kill = compute_kill_from_defs(blocks, definitions, gen)
     
     cfg_data = {
         'blocks': blocks,
         'definitions': definitions,
         'edges': edges,
         'gen': gen,
-        'kill': kill
+        'kill': computed_kill
     }
     
     print("\n" + "="*80)
@@ -231,7 +204,6 @@ def analyze_prog1_gradebook():
 
 
 def analyze_prog2_string_analyzer():
-    """Analyze prog2_string_analyzer.c"""
     
     definitions = {
         'D1': ('B1', 'wcount', 'wcount = 0'),
@@ -270,19 +242,19 @@ def analyze_prog2_string_analyzer():
         ('ENTRY', 'B1'),
         ('B1', 'B2'),
         ('B2', 'B3'),
-        ('B3', 'B3'),  # loop
+        ('B3', 'B3'),
         ('B3', 'B4'),
         ('B4', 'B5'),
-        ('B5', 'B5'),  # loop
+        ('B5', 'B5'),
         ('B5', 'B6'),
-        ('B6', 'B3'),  # back to outer loop
+        ('B6', 'B3'),
         ('B3', 'B7'),
         ('B7', 'B8'),
-        ('B8', 'B8'),  # loop
+        ('B8', 'B8'),
         ('B8', 'B9'),
         ('B9', 'B10'),
         ('B10', 'B11'),
-        ('B11', 'B11'),  # loop
+        ('B11', 'B11'),
         ('B11', 'EXIT'),
     ]
     
@@ -301,29 +273,15 @@ def analyze_prog2_string_analyzer():
         'B11': ['D26', 'D27', 'D28'],
         'EXIT': [],
     }
-    
-    kill = {
-        'ENTRY': [],
-        'B1': ['D9'],
-        'B2': ['D3', 'D7', 'D15', 'D21'],
-        'B3': ['D2', 'D3', 'D7', 'D15', 'D21'],
-        'B4': ['D6'],
-        'B5': ['D4', 'D5', 'D6', 'D7', 'D2', 'D3', 'D15', 'D21'],
-        'B6': ['D8', 'D9', 'D1'],
-        'B7': ['D10', 'D11', 'D12', 'D13', 'D14', 'D15', 'D2', 'D3', 'D7', 'D21'],
-        'B8': ['D10', 'D11', 'D12', 'D13', 'D14', 'D15', 'D16', 'D17', 'D18', 'D19', 'D20', 'D21'],
-        'B9': ['D22'],
-        'B10': ['D23', 'D24', 'D25'],
-        'B11': ['D23', 'D24', 'D25', 'D26', 'D27', 'D28'],
-        'EXIT': [],
-    }
+
+    computed_kill = compute_kill_from_defs(blocks, definitions, gen)
     
     cfg_data = {
         'blocks': blocks,
         'definitions': definitions,
         'edges': edges,
         'gen': gen,
-        'kill': kill
+        'kill': computed_kill
     }
     
     print("\n" + "="*80)
@@ -341,7 +299,6 @@ def analyze_prog2_string_analyzer():
 
 
 def analyze_prog3_grid_bfs():
-    """Analyze prog3_grid_bfs.c"""
     
     definitions = {
         'D1': ('B1', 'i', 'i = 0 (outer loop init)'),
@@ -390,34 +347,34 @@ def analyze_prog3_grid_bfs():
         ('ENTRY', 'B1'),
         ('B1', 'B2'),
         ('B2', 'B3'),
-        ('B3', 'B3'),  # inner loop
+        ('B3', 'B3'),
         ('B3', 'B4'),
-        ('B4', 'B2'),  # back to inner loop check
-        ('B2', 'B5'),  # exit inner, continue
+        ('B4', 'B2'),
+        ('B2', 'B5'),
         ('B5', 'B6'),
         ('B6', 'B7'),
         ('B7', 'B8'),
         ('B8', 'B9'),
-        ('B9', 'B9'),  # inner loop
+        ('B9', 'B9'),
         ('B9', 'B10'),
-        ('B10', 'B8'),  # back to inner
-        ('B8', 'B11'),  # exit both loops
+        ('B10', 'B8'),
+        ('B8', 'B11'),
         ('B11', 'B12'),
-        ('B12', 'B12'),  # BFS loop
+        ('B12', 'B12'),
         ('B12', 'B13'),
         ('B13', 'B14'),
         ('B14', 'B15'),
         ('B15', 'B16'),
-        ('B16', 'B14'),  # k loop
-        ('B14', 'B12'),  # back to BFS
-        ('B12', 'B17'),  # exit BFS
+        ('B16', 'B14'),
+        ('B14', 'B12'),
+        ('B12', 'B17'),
         ('B17', 'B18'),
         ('B18', 'B19'),
         ('B19', 'B20'),
         ('B20', 'B21'),
         ('B21', 'B22'),
-        ('B22', 'B20'),  # k loop
-        ('B20', 'B18'),  # back to while
+        ('B22', 'B20'),
+        ('B20', 'B18'),
         ('B18', 'EXIT'),
     ]
     
@@ -447,40 +404,14 @@ def analyze_prog3_grid_bfs():
         'B22': ['D37'],
         'EXIT': [],
     }
-    
-    kill = {
-        'ENTRY': [],
-        'B1': ['D6', 'D11', 'D16'],
-        'B2': ['D5', 'D12', 'D15'],
-        'B3': ['D2', 'D3', 'D4', 'D5', 'D12', 'D15'],
-        'B4': ['D1', 'D6', 'D11', 'D16'],
-        'B5': [],
-        'B6': [],
-        'B7': ['D1', 'D6', 'D11', 'D16'],
-        'B8': ['D2', 'D5', 'D12', 'D15'],
-        'B9': ['D12', 'D13', 'D14', 'D15', 'D2', 'D5'],
-        'B10': ['D1', 'D6', 'D11', 'D16'],
-        'B11': ['D13', 'D14', 'D17', 'D18', 'D23', 'D24'],
-        'B12': [],
-        'B13': ['D20', 'D25', 'D30', 'D37'],
-        'B14': ['D21', 'D22', 'D31', 'D32'],
-        'B15': ['D13', 'D14', 'D17', 'D18', 'D23', 'D24'],
-        'B16': ['D20', 'D25', 'D30', 'D37'],
-        'B17': ['D26', 'D27', 'D28', 'D33', 'D34', 'D35'],
-        'B18': ['D29', 'D36'],
-        'B19': ['D20', 'D25', 'D30', 'D37'],
-        'B20': ['D21', 'D22', 'D31', 'D32'],
-        'B21': ['D26', 'D27', 'D28', 'D29', 'D33', 'D34', 'D35', 'D36'],
-        'B22': ['D20', 'D25', 'D30', 'D37'],
-        'EXIT': [],
-    }
+    computed_kill = compute_kill_from_defs(blocks, definitions, gen)
     
     cfg_data = {
         'blocks': blocks,
         'definitions': definitions,
         'edges': edges,
         'gen': gen,
-        'kill': kill
+        'kill': computed_kill
     }
     
     print("\n" + "="*80)
@@ -502,7 +433,6 @@ if __name__ == '__main__':
     print("REACHING DEFINITIONS ANALYSIS - LAB 7")
     print("="*80)
     
-    # Analyze all three programs
     print("\n\n")
     analyze_prog1_gradebook()
     
