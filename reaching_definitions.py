@@ -21,7 +21,6 @@ class ReachingDefinitionsAnalysis:
     
     def run_analysis(self):
         iteration = 0
-        
         self.iterations.append(self._capture_state(iteration))
         
         changed = True
@@ -96,14 +95,6 @@ class ReachingDefinitionsAnalysis:
         df = pd.DataFrame(all_rows)
         df.to_csv(filename, index=False)
         print(f"\nResults saved to {filename}")
-    
-    def print_definition_mapping(self):
-        print("\n" + "="*80)
-        print("DEFINITION MAPPING")
-        print("="*80)
-        for def_id in sorted(self.definitions.keys()):
-            block, var, line = self.definitions[def_id]
-            print(f"{def_id}: {var} = ... (Block {block}, Line: {line})")
 
 
 def compute_kill_from_defs(blocks, definitions, gen):
@@ -122,325 +113,146 @@ def compute_kill_from_defs(blocks, definitions, gen):
     return kill
 
 
-def analyze_prog1_gradebook():
+def build_cfg_from_dot(dot_file):
+    with open(dot_file, 'r') as f:
+        content = f.read()
     
-    definitions = {
-        'D1': ('B1', 'n', 'scanf("%d", &n)'),
-        'D2': ('B2', 'i', 'i = 0'),
-        'D3': ('B3', 'cls[i].m1', 'scanf(..., &cls[i].m1, ...)'),
-        'D4': ('B3', 'cls[i].m1', 'scanf(..., &cls[i].m1, ...)'),
-        'D5': ('B3', 'cls[i].m2', 'scanf(..., &cls[i].m2, ...)'),
-        'D6': ('B3', 'cls[i].m3', 'scanf(..., &cls[i].m3, ...)'),
-        'D7': ('B3', 'cls[i].m1', 'cls[i].m1 = 0 (if negative)'),
-        'D8': ('B3', 'cls[i].m2', 'cls[i].m2 = 0 (if negative)'),
-        'D9': ('B3', 'cls[i].m3', 'cls[i].m3 = 0 (if negative)'),
-        'D10': ('B3', 'cls[i].m1', 'cls[i].m1 = 100 (if > 100)'),
-        'D11': ('B3', 'cls[i].m2', 'cls[i].m2 = 100 (if > 100)'),
-        'D12': ('B3', 'cls[i].m3', 'cls[i].m3 = 100 (if > 100)'),
-        'D13': ('B3', 'cls[i].avg', 'compute_avg_and_grade (avg assignment)'),
-        'D14': ('B3', 'cls[i].grade', 'compute_avg_and_grade (grade assignment)'),
-        'D15': ('B3', 'i', 'i++ (for loop increment)'),
-        'D16': ('B4', 'desired', 'scanf("%f", &desired)'),
-        'D17': ('B5', 'sum', 'sum = 0.0f'),
-        'D18': ('B5', 'countA', 'countA = 0'),
-        'D19': ('B5', 'countF', 'countF = 0'),
-        'D20': ('B5', 'i', 'i = 0'),
-        'D21': ('B6', 'sum', 'sum += cls[i].avg'),
-        'D22': ('B6', 'countA', 'countA++ (if A)'),
-        'D23': ('B6', 'countF', 'countF++ (if F)'),
-        'D24': ('B6', 'i', 'i++ (for loop)'),
-        'D25': ('B7', 'class_avg', 'class_avg = sum/n'),
-    }
+    blocks = set()
+    block_pattern = re.compile(r'\b(B\d+|ENTRY|EXIT)\s*\[')
+    for match in block_pattern.finditer(content):
+        blocks.add(match.group(1))
     
-    blocks = ['ENTRY', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'EXIT']
+    blocks_list = ['ENTRY'] if 'ENTRY' in blocks else []
+    blocks_list += sorted([b for b in blocks if b.startswith('B')], key=lambda x: int(x[1:]))
+    if 'EXIT' in blocks:
+        blocks_list.append('EXIT')
     
-    edges = [
-        ('ENTRY', 'B1'),
-        ('B1', 'B2'),
-        ('B2', 'B3'),
-        ('B3', 'B3'),
-        ('B3', 'B4'),
-        ('B4', 'B5'),
-        ('B5', 'B6'),
-        ('B6', 'B6'),
-        ('B6', 'B7'),
-        ('B7', 'EXIT'),
-    ]
+    edges = []
+    edge_pattern = re.compile(r'\b(B\d+|ENTRY|EXIT)\s*->\s*(B\d+|ENTRY|EXIT)')
+    for match in edge_pattern.finditer(content):
+        edges.append((match.group(1), match.group(2)))
     
-    gen = {
-        'ENTRY': [],
-        'B1': ['D1'],
-        'B2': ['D2'],
-        'B3': ['D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13', 'D14', 'D15'],
-        'B4': ['D16'],
-        'B5': ['D17', 'D18', 'D19', 'D20'],
-        'B6': ['D21', 'D22', 'D23', 'D24'],
-        'B7': ['D25'],
-        'EXIT': [],
-    }
+    return blocks_list, edges
 
-    computed_kill = compute_kill_from_defs(blocks, definitions, gen)
+
+def extract_assignments_from_dot(dot_file):
+    with open(dot_file, 'r') as f:
+        content = f.read()
+    
+    block_pattern = re.compile(r'(B\d+|ENTRY|EXIT)\s*\[label="([^"]+)"\]', re.DOTALL)
+    
+    definitions = {}
+    gen = defaultdict(list)
+    def_id = 1
+    
+    for match in block_pattern.finditer(content):
+        block_name = match.group(1)
+        block_content = match.group(2)
+        
+        lines = block_content.replace('\\n', '\n').split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('//') or ':' not in line:
+                continue
+            
+            if ':' in line:
+                code_part = line.split(':', 1)[1].strip()
+            else:
+                code_part = line
+            
+            assign_patterns = [
+                r'(\w+(?:\[[^\]]+\])*(?:\.\w+)*(?:->\w+)*)\s*=\s*[^=]',
+                r'(\w+)\+\+',
+                r'(\w+)--',
+                r'\+\+(\w+)',
+                r'--(\w+)'
+            ]
+            
+            for pattern in assign_patterns:
+                matches = re.finditer(pattern, code_part)
+                for m in matches:
+                    var = m.group(1)
+                    if var and not var.startswith('if') and not var.startswith('for') and not var.startswith('while'):
+                        def_name = f'D{def_id}'
+                        short_line = code_part[:60] + ('...' if len(code_part) > 60 else '')
+                        definitions[def_name] = (block_name, var, short_line)
+                        gen[block_name].append(def_name)
+                        def_id += 1
+                        break
+    
+    return definitions, dict(gen)
+
+
+def analyze_program(dot_file, output_csv, program_name):
+    print(f"\n{'='*80}")
+    print(f"REACHING DEFINITIONS ANALYSIS: {program_name}")
+    print(f"{'='*80}")
+    
+    blocks, edges = build_cfg_from_dot(dot_file)
+    definitions, gen = extract_assignments_from_dot(dot_file)
+    
+    for block in blocks:
+        if block not in gen:
+            gen[block] = []
+    
+    kill = compute_kill_from_defs(blocks, definitions, gen)
     
     cfg_data = {
         'blocks': blocks,
         'definitions': definitions,
         'edges': edges,
         'gen': gen,
-        'kill': computed_kill
+        'kill': kill
     }
     
-    print("\n" + "="*80)
-    print("REACHING DEFINITIONS ANALYSIS: prog1_gradebook.c")
-    print("="*80)
-    
     analysis = ReachingDefinitionsAnalysis(cfg_data)
-    analysis.print_definition_mapping()
+    
+    print("\n" + "="*80)
+    print(f"FOUND {len(definitions)} DEFINITIONS")
+    print("="*80)
+    for def_id in sorted(definitions.keys(), key=lambda x: int(x[1:])):
+        block, var, line = definitions[def_id]
+        print(f"{def_id}: {var} in {block}")
+    
     iterations = analysis.run_analysis()
     print(f"\n\nConverged after {iterations} iterations")
     analysis.print_iterations_table()
-    analysis.save_to_csv('prog1_reaching_definitions.csv')
-    
-    return analysis
-
-
-def analyze_prog2_string_analyzer():
-    
-    definitions = {
-        'D1': ('B1', 'wcount', 'wcount = 0'),
-        'D2': ('B2', 'i', 'i = 0'),
-        'D3': ('B3', 'i', 'i++ (skip non-alnum)'),
-        'D4': ('B4', 'k', 'k = 0'),
-        'D5': ('B5', 'words[wcount][k]', 'words[wcount][k++] = tolower(line[i])'),
-        'D6': ('B5', 'k', 'k++ (implicit)'),
-        'D7': ('B5', 'i', 'i++ (while reading)'),
-        'D8': ('B6', 'words[wcount][k]', 'words[wcount][k] = \\0'),
-        'D9': ('B6', 'wcount', 'wcount++'),
-        'D10': ('B7', 'letters', 'letters = 0'),
-        'D11': ('B7', 'digits', 'digits = 0'),
-        'D12': ('B7', 'spaces', 'spaces = 0'),
-        'D13': ('B7', 'vowels', 'vowels = 0'),
-        'D14': ('B7', 'consonants', 'consonants = 0'),
-        'D15': ('B7', 'i', 'i = 0'),
-        'D16': ('B8', 'letters', 'letters++'),
-        'D17': ('B8', 'vowels', 'vowels++'),
-        'D18': ('B8', 'consonants', 'consonants++'),
-        'D19': ('B8', 'digits', 'digits++'),
-        'D20': ('B8', 'spaces', 'spaces++'),
-        'D21': ('B8', 'i', 'i++ (char loop)'),
-        'D22': ('B9', 'freq[c-a]', 'freq[c-a] = freq[c-a] + 1'),
-        'D23': ('B10', 'pal_count', 'pal_count = 0'),
-        'D24': ('B10', 'max_len', 'max_len = 0'),
-        'D25': ('B10', 'max_idx', 'max_idx = -1'),
-        'D26': ('B11', 'pal_count', 'pal_count++'),
-        'D27': ('B11', 'max_len', 'max_len = L'),
-        'D28': ('B11', 'max_idx', 'max_idx = i'),
-    }
-    
-    blocks = ['ENTRY', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 'B11', 'EXIT']
-    
-    edges = [
-        ('ENTRY', 'B1'),
-        ('B1', 'B2'),
-        ('B2', 'B3'),
-        ('B3', 'B3'),
-        ('B3', 'B4'),
-        ('B4', 'B5'),
-        ('B5', 'B5'),
-        ('B5', 'B6'),
-        ('B6', 'B3'),
-        ('B3', 'B7'),
-        ('B7', 'B8'),
-        ('B8', 'B8'),
-        ('B8', 'B9'),
-        ('B9', 'B10'),
-        ('B10', 'B11'),
-        ('B11', 'B11'),
-        ('B11', 'EXIT'),
-    ]
-    
-    gen = {
-        'ENTRY': [],
-        'B1': ['D1'],
-        'B2': ['D2'],
-        'B3': ['D3'],
-        'B4': ['D4'],
-        'B5': ['D5', 'D6', 'D7'],
-        'B6': ['D8', 'D9'],
-        'B7': ['D10', 'D11', 'D12', 'D13', 'D14', 'D15'],
-        'B8': ['D16', 'D17', 'D18', 'D19', 'D20', 'D21'],
-        'B9': ['D22'],
-        'B10': ['D23', 'D24', 'D25'],
-        'B11': ['D26', 'D27', 'D28'],
-        'EXIT': [],
-    }
-
-    computed_kill = compute_kill_from_defs(blocks, definitions, gen)
-    
-    cfg_data = {
-        'blocks': blocks,
-        'definitions': definitions,
-        'edges': edges,
-        'gen': gen,
-        'kill': computed_kill
-    }
+    analysis.save_to_csv(output_csv)
     
     print("\n" + "="*80)
-    print("REACHING DEFINITIONS ANALYSIS: prog2_string_analyzer.c")
+    print("VARIABLES WITH MULTIPLE REACHING DEFINITIONS")
     print("="*80)
+    multi_def_found = False
+    for block in blocks:
+        in_set = analysis.in_sets[block]
+        vars_in_block = defaultdict(list)
+        for def_id in in_set:
+            if def_id in definitions:
+                var = definitions[def_id][1]
+                vars_in_block[var].append(def_id)
+        
+        multi_def = {v: defs for v, defs in vars_in_block.items() if len(defs) > 1}
+        if multi_def:
+            multi_def_found = True
+            print(f"\n{block}:")
+            for var, defs in sorted(multi_def.items()):
+                print(f"  {var}: {{{', '.join(sorted(defs, key=lambda x: int(x[1:])))}}} ")
     
-    analysis = ReachingDefinitionsAnalysis(cfg_data)
-    analysis.print_definition_mapping()
-    iterations = analysis.run_analysis()
-    print(f"\n\nConverged after {iterations} iterations")
-    analysis.print_iterations_table()
-    analysis.save_to_csv('prog2_reaching_definitions.csv')
-    
-    return analysis
-
-
-def analyze_prog3_grid_bfs():
-    
-    definitions = {
-        'D1': ('B1', 'i', 'i = 0 (outer loop init)'),
-        'D2': ('B2', 'j', 'j = 0 (inner loop init)'),
-        'D3': ('B3', 'grid[i][j]', 'scanf("%d", &grid[i][j])'),
-        'D4': ('B3', 'grid[i][j]', 'grid[i][j] = 1 (sanitize)'),
-        'D5': ('B3', 'j', 'j++ (inner loop)'),
-        'D6': ('B4', 'i', 'i++ (outer loop)'),
-        'D7': ('B5', 'sr', 'scanf("%d %d", &sr, &sc)'),
-        'D8': ('B5', 'sc', 'scanf("%d %d", &sr, &sc)'),
-        'D9': ('B6', 'tr', 'scanf("%d %d", &tr, &tc)'),
-        'D10': ('B6', 'tc', 'scanf("%d %d", &tr, &tc)'),
-        'D11': ('B7', 'i', 'i = 0 (dist/vis init)'),
-        'D12': ('B8', 'j', 'j = 0 (dist/vis inner)'),
-        'D13': ('B9', 'dist[i][j]', 'dist[i][j] = -1'),
-        'D14': ('B9', 'vis[i][j]', 'vis[i][j] = 0'),
-        'D15': ('B9', 'j', 'j++ (inner)'),
-        'D16': ('B10', 'i', 'i++ (outer)'),
-        'D17': ('B11', 'vis[sr][sc]', 'vis[sr][sc] = 1'),
-        'D18': ('B11', 'dist[sr][sc]', 'dist[sr][sc] = 0'),
-        'D19': ('B12', 'u', 'u = q_pop(&Q)'),
-        'D20': ('B13', 'k', 'k = 0'),
-        'D21': ('B14', 'nr', 'nr = u.r + dr[k]'),
-        'D22': ('B14', 'nc', 'nc = u.c + dc[k]'),
-        'D23': ('B15', 'vis[nr][nc]', 'vis[nr][nc] = 1'),
-        'D24': ('B15', 'dist[nr][nc]', 'dist[nr][nc] = dist[u.r][u.c] + 1'),
-        'D25': ('B16', 'k', 'k++'),
-        'D26': ('B17', 'r', 'r = tr'),
-        'D27': ('B17', 'c', 'c = tc'),
-        'D28': ('B17', 'steps', 'steps = dist[tr][tc]'),
-        'D29': ('B18', 'found', 'found = 0'),
-        'D30': ('B19', 'k', 'k = 0 (reconstruct loop)'),
-        'D31': ('B20', 'pr', 'pr = r - dr[k]'),
-        'D32': ('B20', 'pc', 'pc = c - dc[k]'),
-        'D33': ('B21', 'r', 'r = pr'),
-        'D34': ('B21', 'c', 'c = pc'),
-        'D35': ('B21', 'steps', 'steps = steps - 1'),
-        'D36': ('B21', 'found', 'found = 1'),
-        'D37': ('B22', 'k', 'k++ (reconstruct)'),
-    }
-    
-    blocks = ['ENTRY', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'B10', 
-              'B11', 'B12', 'B13', 'B14', 'B15', 'B16', 'B17', 'B18', 'B19', 'B20', 'B21', 'B22', 'EXIT']
-    
-    edges = [
-        ('ENTRY', 'B1'),
-        ('B1', 'B2'),
-        ('B2', 'B3'),
-        ('B3', 'B3'),
-        ('B3', 'B4'),
-        ('B4', 'B2'),
-        ('B2', 'B5'),
-        ('B5', 'B6'),
-        ('B6', 'B7'),
-        ('B7', 'B8'),
-        ('B8', 'B9'),
-        ('B9', 'B9'),
-        ('B9', 'B10'),
-        ('B10', 'B8'),
-        ('B8', 'B11'),
-        ('B11', 'B12'),
-        ('B12', 'B12'),
-        ('B12', 'B13'),
-        ('B13', 'B14'),
-        ('B14', 'B15'),
-        ('B15', 'B16'),
-        ('B16', 'B14'),
-        ('B14', 'B12'),
-        ('B12', 'B17'),
-        ('B17', 'B18'),
-        ('B18', 'B19'),
-        ('B19', 'B20'),
-        ('B20', 'B21'),
-        ('B21', 'B22'),
-        ('B22', 'B20'),
-        ('B20', 'B18'),
-        ('B18', 'EXIT'),
-    ]
-    
-    gen = {
-        'ENTRY': [],
-        'B1': ['D1'],
-        'B2': ['D2'],
-        'B3': ['D3', 'D4', 'D5'],
-        'B4': ['D6'],
-        'B5': ['D7', 'D8'],
-        'B6': ['D9', 'D10'],
-        'B7': ['D11'],
-        'B8': ['D12'],
-        'B9': ['D13', 'D14', 'D15'],
-        'B10': ['D16'],
-        'B11': ['D17', 'D18'],
-        'B12': ['D19'],
-        'B13': ['D20'],
-        'B14': ['D21', 'D22'],
-        'B15': ['D23', 'D24'],
-        'B16': ['D25'],
-        'B17': ['D26', 'D27', 'D28'],
-        'B18': ['D29'],
-        'B19': ['D30'],
-        'B20': ['D31', 'D32'],
-        'B21': ['D33', 'D34', 'D35', 'D36'],
-        'B22': ['D37'],
-        'EXIT': [],
-    }
-    computed_kill = compute_kill_from_defs(blocks, definitions, gen)
-    
-    cfg_data = {
-        'blocks': blocks,
-        'definitions': definitions,
-        'edges': edges,
-        'gen': gen,
-        'kill': computed_kill
-    }
-    
-    print("\n" + "="*80)
-    print("REACHING DEFINITIONS ANALYSIS: prog3_grid_bfs.c")
-    print("="*80)
-    
-    analysis = ReachingDefinitionsAnalysis(cfg_data)
-    analysis.print_definition_mapping()
-    iterations = analysis.run_analysis()
-    print(f"\n\nConverged after {iterations} iterations")
-    analysis.print_iterations_table()
-    analysis.save_to_csv('prog3_reaching_definitions.csv')
+    if not multi_def_found:
+        print("No variables with multiple reaching definitions found.")
     
     return analysis
 
 
 if __name__ == '__main__':
     print("="*80)
-    print("REACHING DEFINITIONS ANALYSIS - LAB 7")
+    print("REACHING DEFINITIONS ANALYSIS - LAB 7 (AUTOMATED)")
     print("="*80)
     
-    print("\n\n")
-    analyze_prog1_gradebook()
-    
-    print("\n\n")
-    analyze_prog2_string_analyzer()
-    
-    print("\n\n")
-    analyze_prog3_grid_bfs()
+    analyze_program('prog1_gradebook.dot', 'prog1_reaching_definitions.csv', 'prog1_gradebook.c')
+    analyze_program('prog2_string_analyzer.dot', 'prog2_reaching_definitions.csv', 'prog2_string_analyzer.c')
+    analyze_program('prog3_grid_bfs.dot', 'prog3_grid_bfs.csv', 'prog3_grid_bfs.c')
     
     print("\n\n" + "="*80)
     print("ANALYSIS COMPLETE - Check the CSV files for detailed results")
